@@ -19,7 +19,7 @@ class StaplesValuationEngine:
         self.results = {}
 
     def fetch_data(self):
-        """데이터 수집: 주가, EPS, 재무지표"""
+        """데이터 수집: 주가, Analyst Estimates, 재무지표"""
         print(f"데이터 수집 중... (대상: {len(self.tickers)}개)")
         
         for ticker in self.tickers:
@@ -36,30 +36,44 @@ class StaplesValuationEngine:
                 # Timezone 제거 (비교 오류 방지)
                 hist.index = hist.index.tz_localize(None)
                 
-                # 2. 재무 데이터 (분기별 EPS, EBITDA 등)
-                # yfinance의 financials는 연간/분기 데이터를 제공함
-                # TTM EPS 계산을 위해 분기 데이터 사용
+                # 2. 재무 데이터 (분기별 EPS)
                 q_income = stock.quarterly_income_stmt
-                q_bs = stock.quarterly_balance_sheet
-                q_cf = stock.quarterly_cashflow
                 
-                # Forward EPS (Yahoo Finance Analyst Estimates)
-                info = stock.info
-                forward_eps = info.get('forwardEps')
-                current_price = info.get('currentPrice')
-                if not current_price:
-                    current_price = hist['Close'].iloc[-1]
+                # 3. Analyst Estimates (Forward EPS) - 핵심 수정 사항
+                # yfinance의 'earnings_estimate' 테이블 사용 (더 정확함)
+                forward_eps = None
+                eps_source = "N/A"
+                
+                try:
+                    estimates = stock.earnings_estimate
+                    if estimates is not None and not estimates.empty:
+                        # '+1y' (다음 연도) 또는 '0y' (올해) 추정치 사용
+                        # 보수적인 평가를 위해 '+1y' (Next Year) 사용 권장
+                        if '+1y' in estimates.index:
+                            forward_eps = estimates.loc['+1y', 'avg']
+                            eps_source = "Analyst Est (+1y)"
+                        elif '0y' in estimates.index:
+                            forward_eps = estimates.loc['0y', 'avg']
+                            eps_source = "Analyst Est (0y)"
+                except Exception as e:
+                    print(f"    Estimates 가져오기 실패: {e}")
+                
+                # Fallback: Estimates가 없으면 info 사용
+                if forward_eps is None:
+                    forward_eps = stock.info.get('forwardEps')
+                    eps_source = "Yahoo Info (Fallback)"
+                
+                # 현재 주가
+                current_price = hist['Close'].iloc[-1]
                 
                 # 데이터 저장 구조
                 self.data[ticker] = {
                     'history': hist,
                     'financials': {
-                        'q_income': q_income,
-                        'q_bs': q_bs,
-                        'q_cf': q_cf
+                        'q_income': q_income
                     },
-                    'info': info,
                     'forward_eps': forward_eps,
+                    'eps_source': eps_source,
                     'current_price': current_price
                 }
                 
@@ -67,59 +81,58 @@ class StaplesValuationEngine:
                 print(f"    오류 발생 ({ticker}): {e}")
 
     def calculate_historical_metrics(self):
-        """과거 밸류에이션 지표 계산 (Historical PER, P/B, Dividend Yield)"""
-        print("\n지표 계산 중...")
+        """과거 밸류에이션 지표 계산 (Robust Logic 적용)"""
+        print("\n지표 계산 중 (Robust Logic 적용)...")
         
         for ticker, data in self.data.items():
             hist = data['history']
             q_income = data['financials']['q_income']
             
-            # --- 1. Historical PER 계산 ---
-            # 분기별 EPS를 가져와서 TTM(Trailing Twelve Months) EPS 계산
-            # 날짜별로 보간하여 Daily PER 산출
+            # --- 1. Historical PER 계산 (Median & Outlier Filtering) ---
             
             if q_income is not None and not q_income.empty and 'Diluted EPS' in q_income.index:
                 eps_q = q_income.loc['Diluted EPS']
-                # 최신순이므로 역순 정렬
                 eps_q = eps_q.sort_index()
                 
                 # TTM EPS = 최근 4분기 합
                 eps_ttm = eps_q.rolling(window=4).sum()
-                
-                # Index Timezone 제거
                 eps_ttm.index = pd.to_datetime(eps_ttm.index).tz_localize(None)
                 
                 # 일별 데이터로 확장 (ffill)
-                # 재무제표 발표일 기준이 정확하지만, 간편하게 해당 분기 말일 기준으로 매핑 후 ffill
                 eps_ttm_daily = eps_ttm.reindex(hist.index, method='ffill')
                 
                 # PER = Price / TTM EPS
                 per_series = hist['Close'] / eps_ttm_daily
                 
-                # 이상치 제거 (적자 전환 등)
-                per_series = per_series[per_series > 0]
-                per_series = per_series[per_series < 100] # 100배 이상은 제외 (일시적 이익 급감 등)
+                # [핵심 수정] 이상치 제거 (Outlier Filtering)
+                # Staples 섹터의 정상 PER 범위: 5배 ~ 60배 (일시적 이익 급감 제외)
+                per_series = per_series[(per_series > 5) & (per_series < 60)]
                 
                 data['metrics'] = {
                     'per_series': per_series,
                     'eps_ttm_daily': eps_ttm_daily
                 }
             else:
-                # EPS 데이터 부족 시 처리
                 print(f"    경고: {ticker} EPS 데이터 부족으로 Historical PER 계산 불가")
                 data['metrics'] = {'per_series': pd.Series()}
 
-            # --- 2. 배당 수익률 (Dividend Yield) ---
-            # yfinance history에 'Dividends' 컬럼이 있음
-            # TTM 배당금 계산
+            # --- 2. 배당 수익률 (Dividend Yield) - 정확한 TTM 계산 ---
+            # [핵심 수정] 최근 4회 지급분 합산 (단순 365일 rolling 아님)
             dividends = hist['Dividends']
-            div_ttm = dividends.rolling(window=365).sum() # 1년치 합계
-            div_yield = (div_ttm / hist['Close']) * 100
+            # 배당이 있는 날만 필터링
+            actual_dividends = dividends[dividends > 0]
             
-            data['metrics']['div_yield_series'] = div_yield
+            if len(actual_dividends) >= 4:
+                div_ttm_val = actual_dividends.tail(4).sum()
+            else:
+                div_ttm_val = actual_dividends.sum() # 4회 미만이면 있는대로 합산
+                
+            div_yield = (div_ttm_val / data['current_price']) * 100
+            
+            data['metrics']['div_yield_val'] = div_yield
 
     def calculate_valuation(self):
-        """적정주가 산출 (평균 PER 회귀 모형)"""
+        """적정주가 산출 (Median PER 회귀 모형)"""
         print("\n밸류에이션 수행 중...")
         
         for ticker, data in self.data.items():
@@ -131,59 +144,58 @@ class StaplesValuationEngine:
             forward_eps = data['forward_eps']
             current_price = data['current_price']
             
-            # 1. 평균 PER 계산 (5년, 10년)
-            # 데이터가 충분하지 않으면 가능한 기간만 사용
-            avg_per_5y = per_series.tail(252*5).mean()
-            avg_per_10y = per_series.mean() # 전체 기간 (최대 10년)
+            # [핵심 수정] 평균(Mean) 대신 중위값(Median) 사용
+            # 이상치(Outlier)에 강건한 지표 사용
+            median_per_5y = per_series.tail(252*5).median()
+            median_per_10y = per_series.median()
             
-            # 최근 PER
-            current_per = per_series.iloc[-1] if not per_series.empty else None
+            # [보수적 접근] 5년과 10년 중 더 낮은 PER 적용 (거품 제거)
+            applied_per = min(median_per_5y, median_per_10y)
+            per_period = "5y" if applied_per == median_per_5y else "10y"
             
-            # 2. 적정주가 계산 (Target Price)
-            # Target Price = Forward EPS * Avg PER
+            # 현재 PER (최근 30일 Median - 노이즈 제거)
+            current_per = per_series.tail(30).median()
+            
+            # 적정주가 계산 (Target Price)
             if forward_eps:
-                target_price_5y = forward_eps * avg_per_5y
-                target_price_10y = forward_eps * avg_per_10y
-                
-                upside_5y = (target_price_5y / current_price - 1) * 100
-                upside_10y = (target_price_10y / current_price - 1) * 100
+                target_price = forward_eps * applied_per
+                upside = (target_price / current_price - 1) * 100
             else:
-                target_price_5y = None
-                target_price_10y = None
-                upside_5y = None
-                upside_10y = None
+                target_price = 0
+                upside = 0
             
             # 결과 저장
             self.results[ticker] = {
                 'Current Price': current_price,
                 'Forward EPS': forward_eps,
+                'EPS Source': data['eps_source'],
                 'Current PER': current_per,
-                'Avg PER (5y)': avg_per_5y,
-                'Avg PER (10y)': avg_per_10y,
-                'Target Price (5y PER)': target_price_5y,
-                'Upside (5y)': upside_5y,
-                'Target Price (10y PER)': target_price_10y,
-                'Upside (10y)': upside_10y,
-                'Div Yield': data['metrics']['div_yield_series'].iloc[-1] if not data['metrics']['div_yield_series'].empty else 0.0
+                'Median PER (5y)': median_per_5y,
+                'Median PER (10y)': median_per_10y,
+                'Applied PER': applied_per,
+                'PER Period': per_period,
+                'Target Price': target_price,
+                'Upside': upside,
+                'Div Yield': data['metrics']['div_yield_val']
             }
 
     def generate_report(self):
         """보고서 출력 (텍스트 중심, 리츠 분석 스타일)"""
         print("\n" + "="*80)
-        print("필수소비재(Consumer Staples) 밸류에이션 리포트")
-        print(" * 핵심: 이익 안정성이 높은 기업은 '평균 PER'로 회귀하는 경향이 강함")
-        print(" * 방식: Forward EPS × 5년 평균 PER = 적정 주가")
+        print("필수소비재(Consumer Staples) 밸류에이션 리포트 (Research Level)")
+        print(" * 핵심: Median PER(중위값)와 Analyst Estimates를 사용한 정밀 분석")
+        print(" * 보수적 적용: 5년 vs 10년 Median 중 '더 낮은 값'을 적용하여 거품 제거")
         print("="*80)
         
-        # --- STEP 1: 밸류에이션 (평균 PER 회귀) ---
+        # --- STEP 1: 밸류에이션 (Median PER 회귀) ---
         print("\n" + "="*80)
-        print("STEP 1: 평균 PER 대비 밸류에이션 (Upside 확인)")
+        print("STEP 1: Median PER 대비 밸류에이션 (Upside 확인)")
         print(" * Upside > 10%: 저평가 (매수 기회)")
         print(" * Upside < -10%: 고평가 (조정 가능성)")
         print("="*80)
         
-        print(f"{'Ticker':<6} | {'Price':<8} | {'Fwd EPS':<8} | {'Avg PER':<8} | {'Target':<9} | {'Upside':<8} | {'Status':<12}")
-        print("-" * 90)
+        print(f"{'Ticker':<6} | {'Price':<8} | {'Fwd EPS':<8} | {'Apply PER':<9} | {'Target':<9} | {'Upside':<8} | {'Status':<12}")
+        print("-" * 95)
         
         # Top Pick 선정을 위한 리스트
         top_picks = []
@@ -191,26 +203,27 @@ class StaplesValuationEngine:
         for ticker, res in self.results.items():
             price = res['Current Price']
             f_eps = res['Forward EPS'] if res['Forward EPS'] else 0
-            a_per = res['Avg PER (5y)'] if res['Avg PER (5y)'] else 0
-            target = res['Target Price (5y PER)'] if res['Target Price (5y PER)'] else 0
-            upside = res['Upside (5y)'] if res['Upside (5y)'] else 0
+            a_per = res['Applied PER'] if not pd.isna(res['Applied PER']) else 0
+            p_period = res['PER Period']
+            target = res['Target Price']
+            upside = res['Upside']
             div = res['Div Yield']
             
             # 상태 판단
             if upside >= 10:
                 status = "★ Undervalued" # 저평가
-                top_picks.append((ticker, upside, div, a_per))
+                top_picks.append((ticker, upside, div, a_per, p_period))
             elif upside <= -10:
                 status = "Overvalued"  # 고평가
             else:
                 status = "Fair Value"  # 적정가
             
-            print(f"{ticker:<6} | ${price:<7.2f} | ${f_eps:<7.2f} | {a_per:<8.2f} | ${target:<8.2f} | {upside:>7.1f}% | {status:<12}")
+            print(f"{ticker:<6} | ${price:<7.2f} | ${f_eps:<7.2f} | {a_per:<5.1f}({p_period}) | ${target:<8.2f} | {upside:>7.1f}% | {status:<12}")
             
         # --- STEP 2: 배당 매력도 (안전마진) ---
         print("\n" + "="*80)
         print("STEP 2: 배당 수익률 (안전마진)")
-        print(" * 필수소비재는 채권 성격이 있어 배당 수익률이 중요함")
+        print(" * 최근 4회 실제 지급분 합산 기준 (정확도 향상)")
         print("="*80)
         print(f"{'Ticker':<6} | {'Div Yield':<10} | {'Evaluation':<15}")
         print("-" * 60)
@@ -236,14 +249,19 @@ class StaplesValuationEngine:
             top_picks.sort(key=lambda x: x[1], reverse=True)
             
             for item in top_picks:
-                t, up, d, per = item
+                t, up, d, per, p_period = item
                 print(f"★ {t}")
                 print(f"   - 상승여력(Upside): {up:+.1f}% (목표가 도달 시)")
                 print(f"   - 배당수익률: {d:.2f}%")
-                print(f"   - 적용 PER: {per:.1f}배 (과거 5년 평균)")
+                print(f"   - 적용 PER: {per:.1f}배 ({p_period} Median)")
                 print("")
         else:
             print("현재 기준 '저평가(Undervalued)' 종목이 없습니다.")
+
+        # --- 데이터 소스 정보 ---
+        print("\n[참고: EPS 데이터 소스]")
+        for ticker, res in self.results.items():
+            print(f" - {ticker}: {res['EPS Source']}")
 
 if __name__ == "__main__":
     # 분석 대상: 대표 필수소비재 기업

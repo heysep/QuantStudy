@@ -1,0 +1,48 @@
+==================================================
+Monthly Win Rate (%) by Sector (Probability of Rise)
+==================================================
+       Technology  Financials  Health Care  Consumer Discretionary  Consumer Staples  Industrials  Utilities  Energy  Materials  Real Estate  Communication Services
+Month                                                                                                                                                               
+1            51.9        55.6         63.0                    48.1              44.4         44.4       44.4    48.1       40.7         50.0                    71.4
+2            55.6        51.9         55.6                    48.1              55.6         55.6       51.9    59.3       59.3         60.0                    28.6
+3            66.7        44.4         63.0                    55.6              66.7         66.7       77.8    70.4       66.7         60.0                    71.4
+4            63.0        63.0         55.6                    63.0              66.7         63.0       81.5    59.3       66.7         40.0                    57.1
+5            63.0        59.3         66.7                    59.3              63.0         63.0       63.0    48.1       63.0         80.0                    85.7
+6            51.9        37.0         55.6                    55.6              40.7         44.4       51.9    51.9       44.4         90.0                    85.7
+7            66.7        66.7         63.0                    70.4              63.0         74.1       66.7    59.3       51.9         90.0                    75.0
+8            55.6        51.9         55.6                    44.4              63.0         59.3       63.0    51.9       44.4         60.0                    62.5
+9            48.1        44.4         40.7                    44.4              44.4         51.9       63.0    51.9       40.7         30.0                    37.5
+10           66.7        66.7         59.3                    59.3              59.3         59.3       74.1    51.9       55.6         30.0                    50.0
+11           74.1        66.7         77.8                    77.8              74.1         77.8       59.3    59.3       81.5         63.6                    75.0
+12           53.8        69.2         69.2                    76.9              65.4         69.2       65.4    65.4       65.4         60.0                    57.1
+
+==================================================
+Best Month for each Sector:
+==================================================
+Technology: Month 11 (74.1%)
+Financials: Month 12 (69.2%)
+Health Care: Month 11 (77.8%)
+Consumer Discretionary: Month 11 (77.8%)
+Consumer Staples: Month 11 (74.1%)
+Industrials: Month 11 (77.8%)
+Utilities: Month 4 (81.5%)
+Energy: Month 3 (70.4%)
+Materials: Month 11 (81.5%)
+Real Estate: Month 6 (90.0%)
+Communication Services: Month 5 (85.7%)
+
+==================================================
+Best Sector for each Month:
+==================================================
+Month 1: Communication Services (71.4%)
+Month 2: Real Estate (60.0%)
+Month 3: Utilities (77.8%)
+Month 4: Utilities (81.5%)
+Month 5: Communication Services (85.7%)
+Month 6: Real Estate (90.0%)
+Month 7: Real Estate (90.0%)
+Month 8: Consumer Staples (63.0%)
+Month 9: Utilities (63.0%)
+Month 10: Utilities (74.1%)
+Month 11: Materials (81.5%)
+Month 12: Consumer Discretionary (76.9%)
