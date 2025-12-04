@@ -353,85 +353,190 @@ class MasterStrategy:
 
 
 # -----------------------------------------------------------------------------
+# 5. Simple Backtester & Reporter (성과 분석용)
+# -----------------------------------------------------------------------------
+class SimpleBacktester:
+    def __init__(self, strategy, price_data, benchmark_ticker='SPY', initial_capital=100_000_000):
+        self.strategy = strategy
+        self.data = price_data
+        self.benchmark_ticker = benchmark_ticker
+        self.initial_capital = initial_capital
+        
+    def run(self, start_date=None):
+        """월간 리밸런싱 백테스트 실행"""
+        if start_date:
+            self.data = self.data[self.data.index >= start_date]
+            
+        # 월말 날짜 추출 (리밸런싱 시점)
+        monthly_dates = self.data.resample('M').last().index
+        
+        # 결과 저장용
+        portfolio_value = [self.initial_capital]
+        dates = [self.data.index[0]]
+        
+        current_weights = pd.Series(dtype=float)
+        current_cash = self.initial_capital
+        current_holdings = pd.Series(dtype=float) # 평가액 기준
+        
+        print(f"백테스트 시작: {self.data.index[0].date()} ~ {self.data.index[-1].date()}")
+        print("진행 중...", end="", flush=True)
+        
+        # 일별 시뮬레이션
+        for i, date in enumerate(self.data.index):
+            if i == 0: continue
+            
+            # 1. 리밸런싱 체크 (매월 첫 거래일 또는 월말 직후)
+            # 여기서는 간단히 '해당 날짜가 월의 첫 거래일이면' 리밸런싱 수행으로 가정
+            is_rebalance_day = (date.month != self.data.index[i-1].month)
+            
+            # 현재 자산 가치 평가
+            daily_prices = self.data.loc[date]
+            prev_prices = self.data.loc[self.data.index[i-1]]
+            
+            # 수익률 적용 (보유 중인 종목만)
+            if not current_holdings.empty:
+                asset_returns = daily_prices / prev_prices - 1
+                # 보유 종목들의 가치 변동 반영
+                for ticker, val in current_holdings.items():
+                    if ticker in asset_returns:
+                        current_holdings[ticker] *= (1 + asset_returns[ticker])
+            
+            total_value = current_cash + current_holdings.sum()
+            
+            # 리밸런싱 수행
+            if is_rebalance_day:
+                print(".", end="", flush=True)
+                # 과거 데이터만 사용 (Lookahead Bias 방지)
+                # 실제로는 전일 종가 기준 데이터 사용
+                sub_data = self.data.loc[:self.data.index[i-1]]
+                
+                # 전략 비중 산출
+                target_weights = self.strategy.rebalance(sub_data)
+                
+                # 포트폴리오 재구성
+                # 레버리지 포함된 비중일 수 있음 (합 > 1.0)
+                # 여기서는 단순화를 위해 (총자산 * 비중) 만큼 매수한다고 가정 (차입 가정)
+                # 현금 = 총자산 - 주식매입액 (음수면 차입)
+                
+                stock_value = total_value * target_weights.sum() # 주식 총액
+                current_holdings = total_value * target_weights # 종목별 평가액
+                current_cash = total_value - current_holdings.sum()
+            
+            portfolio_value.append(total_value)
+            dates.append(date)
+            
+        print(" 완료!")
+        
+        self.equity_curve = pd.Series(portfolio_value, index=dates)
+        return self.equity_curve
+
+    def analyze_performance(self):
+        """성과 지표 계산 및 출력"""
+        # 벤치마크(SPY) 수익률 계산
+        spy_data = self.data[self.benchmark_ticker]
+        spy_curve = (spy_data / spy_data.iloc[0]) * self.initial_capital
+        spy_curve = spy_curve.reindex(self.equity_curve.index, method='ffill')
+        
+        # 일별 수익률
+        strat_ret = self.equity_curve.pct_change().fillna(0)
+        bench_ret = spy_curve.pct_change().fillna(0)
+        
+        # 1. Total Return
+        strat_total = (self.equity_curve.iloc[-1] / self.equity_curve.iloc[0]) - 1
+        bench_total = (spy_curve.iloc[-1] / spy_curve.iloc[0]) - 1
+        
+        # 2. CAGR (연평균)
+        days = (self.equity_curve.index[-1] - self.equity_curve.index[0]).days
+        years = days / 365.25
+        strat_cagr = (1 + strat_total) ** (1/years) - 1
+        bench_cagr = (1 + bench_total) ** (1/years) - 1
+        
+        # 3. MDD
+        cum_max = self.equity_curve.cummax()
+        drawdown = (self.equity_curve - cum_max) / cum_max
+        strat_mdd = drawdown.min()
+        
+        cum_max_b = spy_curve.cummax()
+        drawdown_b = (spy_curve - cum_max_b) / cum_max_b
+        bench_mdd = drawdown_b.min()
+        
+        # 4. Sharpe Ratio (무위험이자율 0 가정)
+        strat_sharpe = (strat_ret.mean() * 252) / (strat_ret.std() * np.sqrt(252))
+        bench_sharpe = (bench_ret.mean() * 252) / (bench_ret.std() * np.sqrt(252))
+        
+        # 5. Volatility (연)
+        strat_vol = strat_ret.std() * np.sqrt(252)
+        bench_vol = bench_ret.std() * np.sqrt(252)
+        
+        # 출력
+        print(f"\n{'='*50}")
+        print(f"성과 분석 리포트 ({days}일간)")
+        print(f"{'='*50}")
+        print(f"{'Metric':<15} | {'Strategy':<12} | {'Benchmark (SPY)':<15} | {'Diff':<10}")
+        print(f"{'-'*60}")
+        print(f"{'CAGR (연수익)':<15} | {strat_cagr*100:>11.2f}% | {bench_cagr*100:>14.2f}% | {(strat_cagr-bench_cagr)*100:>+9.2f}%p")
+        print(f"{'MDD (최대낙폭)':<15} | {strat_mdd*100:>11.2f}% | {bench_mdd*100:>14.2f}% | {(strat_mdd-bench_mdd)*100:>+9.2f}%p")
+        print(f"{'Sharpe Ratio':<15} | {strat_sharpe:>11.2f}  | {bench_sharpe:>14.2f}  | {strat_sharpe-bench_sharpe:>+9.2f}")
+        print(f"{'Volatility':<15} | {strat_vol*100:>11.2f}% | {bench_vol*100:>14.2f}% | {(strat_vol-bench_vol)*100:>+9.2f}%p")
+        print(f"{'Total Return':<15} | {strat_total*100:>11.2f}% | {bench_total*100:>14.2f}% | {(strat_total-bench_total)*100:>+9.2f}%p")
+        print(f"{'='*50}")
+        
+        # 시각화
+        plt.figure(figsize=(12, 8))
+        
+        plt.subplot(2, 1, 1)
+        plt.plot(self.equity_curve, label='Trend+Mom Strategy', color='red', linewidth=2)
+        plt.plot(spy_curve, label='Benchmark (SPY)', color='gray', linestyle='--')
+        plt.title('Portfolio Cumulative Return')
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        
+        plt.subplot(2, 1, 2)
+        plt.plot(drawdown * 100, label='Strategy Drawdown', color='blue', linewidth=1)
+        plt.plot(drawdown_b * 100, label='Benchmark Drawdown', color='gray', linestyle=':', alpha=0.5)
+        plt.fill_between(drawdown.index, drawdown * 100, 0, color='blue', alpha=0.1)
+        plt.title('Drawdown (%)')
+        plt.ylabel('DD (%)')
+        plt.grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        plt.show()
+
+# -----------------------------------------------------------------------------
 # 실행 테스트 (Main)
 # -----------------------------------------------------------------------------
 if __name__ == "__main__":
-    print("=== 퀀트 전략 엔진 테스트 시작 ===")
+    print("=== 퀀트 전략 엔진 테스트 및 백테스트 ===")
     
     # 1. 데이터 가져오기 (yfinance 활용)
     # 글로벌 주요 자산군 ETF (주식, 채권, 부동산, 원자재 등)
     tickers = ['SPY', 'QQQ', 'IWM', 'VNQ', 'GLD', 'TLT', 'HYG', 'EEM']
-    print(f"대상 자산: {tickers}")
     
     end_date = datetime.today()
-    start_date = end_date - timedelta(days=365*3) # 최근 3년 데이터
+    start_date = end_date - timedelta(days=365*3) # 3년치 데이터
     
-    print("데이터 다운로드 중...")
+    print(f"데이터 다운로드 중... ({start_date.date()} ~ {end_date.date()})")
     try:
         data = yf.download(tickers, start=start_date, end=end_date, progress=False)['Close']
         data = data.ffill() # 결측치 보정
         
         if data.empty:
-            print("데이터 다운로드 실패. 인터넷 연결을 확인하세요.")
+            print("데이터 다운로드 실패.")
         else:
             print(f"데이터 준비 완료. (Rows: {len(data)})")
             
             # 2. 전략 엔진 초기화
-            # 실제로는 학습된 XGB 모델을 로드해서 넣어야 함. 여기선 None (Rule-based Fallback 사용)
-            strategy = MasterStrategy(xgb_model=None, target_vol=0.12, top_k=4)
+            strategy = MasterStrategy(xgb_model=None, target_vol=0.12, top_k=3)
             
-            # 3. 리밸런싱 실행 (오늘 날짜 기준)
-            print("\n[오늘 기준 포트폴리오 리밸런싱]")
-            weights = strategy.rebalance(data)
+            # 3. 상세 백테스트 실행
+            backtester = SimpleBacktester(strategy, data, benchmark_ticker='SPY')
             
-            # 4. 결과 출력
-            print("-" * 40)
-            print(f"{'Ticker':<10} | {'Weight':<10} | {'Value (1억 투자시)'}")
-            print("-" * 40)
+            # 데이터가 충분히 쌓인 시점(예: 1년 후)부터 백테스트 시작
+            bt_start = data.index[0] + timedelta(days=252)
+            backtester.run(start_date=bt_start)
             
-            invest_amount = 100_000_000 # 1억원
-            
-            # 비중이 있는 종목만 출력
-            active_weights = weights[weights > 0].sort_values(ascending=False)
-            
-            for ticker, w in active_weights.items():
-                val = w * invest_amount
-                print(f"{ticker:<10} | {w:>9.2%} | {val:>15,.0f} 원")
-                
-            print("-" * 40)
-            total_lev = weights.sum()
-            print(f"Total Leverage: {total_lev:.2%} (Cash: {1-total_lev:.2%})")
-            
-            # 5. 간단한 백테스트 시뮬레이션 (최근 6개월, 월간 리밸런싱)
-            print("\n[최근 12개월 월간 리밸런싱 시뮬레이션]")
-            
-            # 월말 날짜 추출
-            monthly_dates = data.resample('M').last().index
-            history = []
-            
-            # 최소 데이터 기간(1년) 확보 후 시작
-            sim_dates = [d for d in monthly_dates if d > data.index[0] + timedelta(days=252)]
-            sim_dates = sim_dates[-12:] # 최근 1년치만
-            
-            for d in sim_dates:
-                # 해당 날짜까지의 데이터 슬라이싱
-                sub_data = data.loc[:d]
-                
-                # 리밸런싱
-                w = strategy.rebalance(sub_data)
-                
-                # 기록
-                top_pick = w.idxmax() if w.sum() > 0 else "None"
-                leverage = w.sum()
-                history.append({
-                    "Date": d.date(),
-                    "Top_Pick": top_pick,
-                    "Leverage": f"{leverage:.2f}x",
-                    "Num_Assets": len(w[w>0])
-                })
-                
-            hist_df = pd.DataFrame(history)
-            print(hist_df)
+            # 4. 성과 분석 및 리포트 출력
+            backtester.analyze_performance()
 
     except Exception as e:
         print(f"오류 발생: {e}")
