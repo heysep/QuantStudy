@@ -4,21 +4,22 @@ import numpy as np
 import xgboost as xgb
 import matplotlib.pyplot as plt
 import warnings
+from datetime import datetime
 
 warnings.filterwarnings('ignore')
 
 class MomentumBacktester:
-    def __init__(self, start_date='2023-01-01', top_n=30):
+    def __init__(self, start_date='2010-01-01', top_n=30, initial_capital=100_000_000):
         self.start_date = pd.to_datetime(start_date)
         self.top_n = top_n
+        self.initial_capital = initial_capital
         self.tickers = []
         self.data = None
         self.features = pd.DataFrame()
         self.results = []
         
     def get_tickers(self):
-        # Reuse logic or hardcode top liquid names for speed if needed
-        # For proof, using full S&P 500 is better
+        # S&P 500 tickers
         try:
             table = pd.read_html('https://en.wikipedia.org/wiki/List_of_S%26P_500_companies')
             self.tickers = table[0]['Symbol'].tolist()
@@ -30,9 +31,9 @@ class MomentumBacktester:
             self.tickers = ['AAPL', 'MSFT', 'GOOGL', 'AMZN', 'NVDA', 'TSLA', 'META', 'BRK-B', 'V', 'JNJ', 'SPY']
 
     def fetch_data(self):
-        print("데이터 다운로드 중 (3년)...")
-        # Download 3 years to have enough history for features before start_date
-        self.data = yf.download(self.tickers, period="3y", group_by='ticker', progress=True, threads=True)
+        # 2010년 백테스트를 위해 2009년부터 다운로드 (1년치 윈도우 확보)
+        print("데이터 다운로드 중 (2009-01-01 ~ 현재)...")
+        self.data = yf.download(self.tickers, start="2009-01-01", group_by='ticker', progress=True, threads=True)
         
     def calculate_features(self, df):
         # Helper to calc features for a single ticker dataframe
@@ -56,7 +57,12 @@ class MomentumBacktester:
     def prepare_all_features(self):
         print("전체 지표 계산 중...")
         feature_list = []
-        valid_tickers = [t for t in self.tickers if t in self.data.columns.levels[0]]
+        
+        # MultiIndex 처리
+        if isinstance(self.data.columns, pd.MultiIndex):
+            valid_tickers = [t for t in self.tickers if t in self.data.columns.levels[0]]
+        else:
+            valid_tickers = self.tickers
         
         for ticker in valid_tickers:
             try:
@@ -82,29 +88,23 @@ class MomentumBacktester:
     def run_backtest(self):
         print(f"\n백테스트 시작 (Start Date: {self.start_date.date()})...")
         
-        # Get unique dates from features, filtered by start_date
-        # We rebalance every 21 trading days (approx monthly)
         all_dates = self.features.index.unique().sort_values()
         rebalance_dates = [d for d in all_dates if d >= self.start_date]
         # Resample to monthly (approx every 21 days)
         rebalance_dates = rebalance_dates[::21] 
         
-        portfolio_value = 10000.0
-        spy_value = 10000.0
+        portfolio_value = self.initial_capital
+        spy_value = self.initial_capital
         
         history = []
         
         for i, date in enumerate(rebalance_dates[:-1]):
             # 1. Train Model (Data up to 'date')
-            # We need targets to be known, so we use data up to (date - 1 month) for training labels
-            # But for features, we use data up to 'date'
-            
-            # Training Data: All history up to 'date' where Target is known (non-NaN)
             train_mask = (self.features.index < date) & (self.features['Target_Next_1m'].notna())
             train_data = self.features[train_mask]
             
             if len(train_data) < 1000:
-                print(f"Skipping {date.date()}: Not enough training data")
+                # print(f"Skipping {date.date()}: Not enough training data")
                 continue
                 
             X_train = train_data[['Ret_12m', 'Ret_6m', 'Ret_3m', 'Mom_Quality', 'RSTR', 'RS_Rank']]
@@ -125,11 +125,8 @@ class MomentumBacktester:
             
             # Pick Top N
             top_picks = current_data.sort_values('Pred_Score', ascending=False).head(self.top_n)
-            selected_tickers = top_picks['Ticker'].tolist()
             
             # 3. Calculate Return (Next Period)
-            # Return is 'Target_Next_1m' which is actual return from date to date+21
-            # We assume equal weight
             avg_return = top_picks['Target_Next_1m'].mean()
             
             # Benchmark Return (SPY)
@@ -143,7 +140,7 @@ class MomentumBacktester:
             portfolio_value *= (1 + avg_return)
             spy_value *= (1 + spy_return)
             
-            print(f"[{date.date()}] Port: {portfolio_value:.0f} (+{avg_return*100:.1f}%) vs SPY: {spy_value:.0f} (+{spy_return*100:.1f}%)")
+            print(f"[{date.date()}] Port: {portfolio_value:,.0f} (+{avg_return*100:.1f}%) vs SPY: {spy_value:,.0f} (+{spy_return*100:.1f}%)")
             
             history.append({
                 'Date': date,
@@ -160,31 +157,43 @@ class MomentumBacktester:
             print("결과가 없습니다.")
             return
             
-        total_return = (self.results['Portfolio'].iloc[-1] / 10000 - 1) * 100
-        spy_total_return = (self.results['SPY'].iloc[-1] / 10000 - 1) * 100
+        total_return = (self.results['Portfolio'].iloc[-1] / self.initial_capital - 1) * 100
+        spy_total_return = (self.results['SPY'].iloc[-1] / self.initial_capital - 1) * 100
         
         print("\n" + "="*50)
         print("백테스트 최종 결과")
         print("="*50)
-        print(f"전략 수익률: {total_return:.2f}%")
-        print(f"SPY 수익률 : {spy_total_return:.2f}%")
-        print(f"초과 수익률: {total_return - spy_total_return:.2f}%p")
+        print(f"초기 투자금 : {self.initial_capital:,.0f} 원")
+        print(f"최종 평가액 : {self.results['Portfolio'].iloc[-1]:,.0f} 원")
+        print(f"전략 수익률 : {total_return:.2f}%")
+        print(f"SPY 수익률  : {spy_total_return:.2f}%")
+        print(f"초과 수익률 : {total_return - spy_total_return:.2f}%p")
         
         # Plot
         plt.figure(figsize=(12, 6))
         plt.plot(self.results['Date'], self.results['Portfolio'], label='Momentum Strategy', linewidth=2)
         plt.plot(self.results['Date'], self.results['SPY'], label='S&P 500 (SPY)', linestyle='--', color='gray')
-        plt.title('Momentum Strategy vs S&P 500 (Backtest)')
+        plt.title(f'Momentum Strategy vs S&P 500 (Start: {self.start_date.date()})')
         plt.xlabel('Date')
-        plt.ylabel('Portfolio Value ($10k Start)')
+        plt.ylabel('Portfolio Value')
         plt.legend()
         plt.grid(True, alpha=0.3)
         plt.savefig('backtest_result.png')
         print("결과 그래프 저장됨: backtest_result.png")
 
 if __name__ == "__main__":
-    # Run backtest from 2023
-    bt = MomentumBacktester(start_date='2023-01-01', top_n=30)
+    # 사용자 입력 받기
+    try:
+        input_str = input("\n투자하실 총 금액을 입력해주세요 (예: 100000000): ")
+        initial_capital = int(input_str.replace(",", "").replace("_", ""))
+        if initial_capital <= 0: raise ValueError
+        print(f"-> 설정된 투자금: {initial_capital:,.0f} 원\n")
+    except:
+        print("-> 기본값 1억원(100,000,000)으로 설정합니다.\n")
+        initial_capital = 100_000_000
+
+    # Run backtest from 2010
+    bt = MomentumBacktester(start_date='2010-01-01', top_n=30, initial_capital=initial_capital)
     bt.get_tickers()
     bt.fetch_data()
     bt.prepare_all_features()

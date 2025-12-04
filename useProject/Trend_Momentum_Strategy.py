@@ -508,12 +508,24 @@ class SimpleBacktester:
 if __name__ == "__main__":
     print("=== 퀀트 전략 엔진 테스트 및 백테스트 ===")
     
+    # [추가] 사용자로부터 투자금 입력 받기
+    try:
+        input_str = input("\n투자하실 총 금액을 입력해주세요 (예: 100000000): ")
+        # 쉼표(,)나 언더바(_) 제거 후 정수로 변환
+        initial_capital = int(input_str.replace(",", "").replace("_", ""))
+        if initial_capital <= 0:
+            raise ValueError
+        print(f"-> 설정된 투자금: {initial_capital:,.0f} 원\n")
+    except ValueError:
+        print("-> [주의] 유효하지 않은 입력입니다. 기본값 1억원(100,000,000)으로 진행합니다.\n")
+        initial_capital = 100_000_000
+    
     # 1. 데이터 가져오기 (yfinance 활용)
     # 글로벌 주요 자산군 ETF (주식, 채권, 부동산, 원자재 등)
     tickers = ['SPY', 'QQQ', 'IWM', 'VNQ', 'GLD', 'TLT', 'HYG', 'EEM']
     
     end_date = datetime.today()
-    start_date = end_date - timedelta(days=365*3) # 3년치 데이터
+    start_date = datetime(2010, 1, 1) # 2010년부터 데이터 수집
     
     print(f"데이터 다운로드 중... ({start_date.date()} ~ {end_date.date()})")
     try:
@@ -528,8 +540,9 @@ if __name__ == "__main__":
             # 2. 전략 엔진 초기화
             strategy = MasterStrategy(xgb_model=None, target_vol=0.12, top_k=3)
             
-            # 3. 상세 백테스트 실행
-            backtester = SimpleBacktester(strategy, data, benchmark_ticker='SPY')
+            # 3. 상세 백테스트 실행 (입력받은 금액으로 시뮬레이션)
+            # 백테스트 객체 생성 시 initial_capital 전달
+            backtester = SimpleBacktester(strategy, data, benchmark_ticker='SPY', initial_capital=initial_capital)
             
             # 데이터가 충분히 쌓인 시점(예: 1년 후)부터 백테스트 시작
             bt_start = data.index[0] + timedelta(days=252)
@@ -537,6 +550,39 @@ if __name__ == "__main__":
             
             # 4. 성과 분석 및 리포트 출력
             backtester.analyze_performance()
+            
+            # 5. [중요] 오늘 기준 최종 포트폴리오 배분 제안
+            print("\n" + "="*50)
+            print(f" [최종] 오늘 기준 포트폴리오 배분 제안")
+            print(f" 투자금: {initial_capital:,.0f} 원")
+            print("="*50)
+            
+            # 오늘자 리밸런싱 계산
+            current_weights = strategy.rebalance(data)
+            
+            # 비중이 있는 종목만 필터링
+            active_weights = current_weights[current_weights > 0].sort_values(ascending=False)
+            
+            print(f"{'Ticker':<10} | {'비중':<10} | {'매수 금액':<15}")
+            print("-" * 45)
+            
+            stock_sum = 0
+            for ticker, w in active_weights.items():
+                buy_amt = w * initial_capital
+                stock_sum += buy_amt
+                print(f"{ticker:<10} | {w*100:>6.2f}%   | {buy_amt:>15,.0f} 원")
+            
+            print("-" * 45)
+            cash_w = 1.0 - active_weights.sum()
+            cash_amt = initial_capital - stock_sum
+            
+            # 레버리지 사용 시 현금은 마이너스(차입)로 표시될 수 있음
+            if cash_w >= 0:
+                print(f"{'CASH':<10} | {cash_w*100:>6.2f}%   | {cash_amt:>15,.0f} 원")
+            else:
+                print(f"{'LEVERAGE':<10} | {active_weights.sum()*100:>6.2f}%   | (차입 필요)")
+                
+            print("="*50)
 
     except Exception as e:
         print(f"오류 발생: {e}")
