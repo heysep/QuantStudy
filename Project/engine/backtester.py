@@ -53,7 +53,13 @@ class Backtester:
             # 리밸런싱
             if is_rebalance_day:
                 print(".", end="", flush=True)
-                sub_data = self.data.loc[:self.data.index[i-1]]
+                # [Optimization] 전체 역사를 다 넘기면 점점 느려짐.
+                # 전략이 필요한 최소 기간(예: 1년=252일) + 여유분(예: 150일)만 슬라이싱해서 전달
+                lookback_window = 400 
+                if i > lookback_window:
+                    sub_data = self.data.iloc[i-lookback_window:i]
+                else:
+                    sub_data = self.data.iloc[:i]
                 
                 # 전략 객체에서 비중 받아오기
                 target_weights = self.strategy.rebalance(sub_data)

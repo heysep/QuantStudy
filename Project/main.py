@@ -20,14 +20,22 @@ def main():
     print("=== 퀀트 전략 실행 (Screening + Momentum) ===")
     
     # 1. 사용자 입력
-    try:
-        input_str = input("\n투자하실 총 금액을 입력해주세요 (예: 100000000): ")
-        initial_capital = int(input_str.replace(",", "").replace("_", ""))
-        if initial_capital <= 0: raise ValueError
-        print(f"-> 설정된 투자금: {initial_capital:,.0f} 원\n")
-    except:
-        print("-> 기본값 1억원으로 설정합니다.\n")
-        initial_capital = 100_000_000
+    while True:
+        try:
+            input_str = input("\n투자하실 총 금액을 입력해주세요 (예: 100000000): ")
+            if not input_str.strip(): # 빈 입력 방지
+                print("금액을 입력해야 합니다.")
+                continue
+                
+            initial_capital = int(input_str.replace(",", "").replace("_", ""))
+            if initial_capital <= 0:
+                print("0보다 큰 금액을 입력해주세요.")
+                continue
+                
+            print(f"-> 설정된 투자금: {initial_capital:,.0f} 원\n")
+            break
+        except ValueError:
+            print("잘못된 입력입니다. 숫자만 입력해주세요.")
 
     # 2. 1차 스크리닝 실행
     print("\n[Step 1] 1차 스크리닝(Pre-Screening) 실행 중...")
